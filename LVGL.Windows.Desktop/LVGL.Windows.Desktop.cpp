@@ -22,6 +22,7 @@
 #include <queue>
 #include <utility>
 #include <vector>
+#include <array>
 
 #if _MSC_VER >= 1200
 // Disable compilation warnings.
@@ -43,6 +44,39 @@
 #endif
 
 #include <LVGL.Windows.Font.h>
+
+struct lvgl_handle_t
+{
+    lv_disp_drv_t                   disp_drv;
+    lv_disp_draw_buf_t              disp_buf;
+    lv_indev_drv_t                  indev_drv;
+    lv_indev_drv_t                  kb_drv;
+    lv_indev_drv_t                  enc_drv;
+    std::array<lv_color_t, 65536>*  raw_disp_buf_p;
+    lv_group_t* volatile            g_DefaultGroup;
+
+
+    lvgl_handle_t()
+    {
+        raw_disp_buf_p = new std::array<lv_color_t, 65536>();
+    }
+
+    ~lvgl_handle_t()
+    {
+        delete raw_disp_buf_p;
+    }
+};
+
+static lvgl_handle_t* current_handle_p{ nullptr };
+void lvgl_set_current_handle( lvgl_handle_t* handle_p )
+{
+    current_handle_p = handle_p;
+}
+
+lvgl_handle_t* lvgl_get_current_handle()
+{
+    return current_handle_p;
+}
 
 /**
  * @brief Returns the dots per inch (dpi) value for the associated window.
@@ -202,7 +236,7 @@ std::mutex g_KeyboardMutex;
 std::queue<std::pair<std::uint32_t, ::lv_indev_state_t>> g_KeyQueue;
 static uint16_t volatile g_Utf16HighSurrogate = 0;
 static uint16_t volatile g_Utf16LowSurrogate = 0;
-static lv_group_t* volatile g_DefaultGroup = nullptr;
+
 
 void LvglDisplayDriverFlushCallback(
     lv_disp_drv_t* disp_drv,
@@ -485,7 +519,13 @@ LRESULT CALLBACK WndProc(
         if (hInputMethodContext)
         {
             lv_obj_t* TextareaObject = nullptr;
-            lv_obj_t* FocusedObject = ::lv_group_get_focused(g_DefaultGroup);
+            auto handle_p = lvgl_get_current_handle();
+            if ( handle_p == nullptr )
+            {
+                // Major bug!
+                return 0;
+            }
+            lv_obj_t* FocusedObject = ::lv_group_get_focused(handle_p->g_DefaultGroup);
             if (FocusedObject)
             {
                 const lv_obj_class_t* ObjectClass = ::lv_obj_get_class(
@@ -678,54 +718,55 @@ bool LvglWindowsInitialize(
     Mile::EnableChildWindowDpiMessage(g_WindowHandle);
     g_WindowDPI = ::LvglGetDpiForWindow(g_WindowHandle);
 
-    static lv_disp_drv_t disp_drv;
-    ::lv_disp_drv_init(&disp_drv);
-    static lv_color_t raw_disp_buf[65536];
-    lv_disp_draw_buf_t* disp_buf = new lv_disp_draw_buf_t();
-    ::lv_disp_draw_buf_init(
-        disp_buf,
-        raw_disp_buf,
-        nullptr,
-        65536);
-    disp_drv.hor_res = static_cast<lv_coord_t>(g_WindowWidth);
-    disp_drv.ver_res = static_cast<lv_coord_t>(g_WindowHeight);
-    disp_drv.flush_cb = ::LvglDisplayDriverFlushCallback;
-    disp_drv.draw_buf = disp_buf;
-    disp_drv.dpi = g_WindowDPI;
-    ::lv_disp_drv_register(&disp_drv);
 
-    g_DefaultGroup = ::lv_group_create();
-    ::lv_group_set_default(g_DefaultGroup);
-
-    static lv_indev_drv_t indev_drv;
-    ::lv_indev_drv_init(&indev_drv);
-    indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.read_cb = ::LvglMouseDriverReadCallback;
-    ::lv_indev_set_group(
-        ::lv_indev_drv_register(&indev_drv),
-        g_DefaultGroup);
-
-    static lv_indev_drv_t kb_drv;
-    lv_indev_drv_init(&kb_drv);
-    kb_drv.type = LV_INDEV_TYPE_KEYPAD;
-    kb_drv.read_cb = ::LvglKeyboardDriverReadCallback;
-    ::lv_indev_set_group(
-        ::lv_indev_drv_register(&kb_drv),
-        g_DefaultGroup);
-
-    static lv_indev_drv_t enc_drv;
-    lv_indev_drv_init(&enc_drv);
-    enc_drv.type = LV_INDEV_TYPE_ENCODER;
-    enc_drv.read_cb = ::LvglMousewheelDriverReadCallback;
-    ::lv_indev_set_group(
-        ::lv_indev_drv_register(&enc_drv),
-        g_DefaultGroup);
 
     ::ShowWindow(g_WindowHandle, nShowCmd);
     ::UpdateWindow(g_WindowHandle);
    
     return true;
 }
+
+void lvgl_initialize(lvgl_handle_t& handle)
+{
+    lv_disp_drv_init(&handle.disp_drv);
+    lv_disp_draw_buf_init(
+        &handle.disp_buf,
+        handle.raw_disp_buf_p->data(),
+        nullptr,
+        65536
+    );
+    handle.disp_drv.hor_res = static_cast<lv_coord_t>(g_WindowWidth);
+    handle.disp_drv.ver_res = static_cast<lv_coord_t>(g_WindowHeight);
+    handle.disp_drv.flush_cb = LvglDisplayDriverFlushCallback;
+    handle.disp_drv.draw_buf = &handle.disp_buf;
+    handle.disp_drv.dpi = g_WindowDPI;
+    lv_disp_drv_register(&handle.disp_drv);
+
+    handle.g_DefaultGroup = lv_group_create();
+    lv_group_set_default(handle.g_DefaultGroup);
+
+    lv_indev_drv_init(&handle.indev_drv);
+    handle.indev_drv.type = LV_INDEV_TYPE_POINTER;
+    handle.indev_drv.read_cb = LvglMouseDriverReadCallback;
+    lv_indev_set_group(
+        lv_indev_drv_register(&handle.indev_drv),
+        handle.g_DefaultGroup);
+
+    lv_indev_drv_init(&handle.kb_drv);
+    handle.kb_drv.type = LV_INDEV_TYPE_KEYPAD;
+    handle.kb_drv.read_cb = LvglKeyboardDriverReadCallback;
+    lv_indev_set_group(
+        lv_indev_drv_register(&handle.kb_drv),
+        handle.g_DefaultGroup);
+
+    lv_indev_drv_init(&handle.enc_drv);
+    handle.enc_drv.type = LV_INDEV_TYPE_ENCODER;
+    handle.enc_drv.read_cb = ::LvglMousewheelDriverReadCallback;
+    lv_indev_set_group(
+        lv_indev_drv_register(&handle.enc_drv),
+        handle.g_DefaultGroup);
+}
+
 
 void LvglTaskSchedulerLoop()
 {
@@ -787,8 +828,6 @@ int WINAPI wWinMain(
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
 
-    ::lv_init();
-
     if (!LvglWindowsInitialize(
         hInstance,
         nShowCmd,
@@ -797,11 +836,23 @@ int WINAPI wWinMain(
         return -1;
     }
 
-    ::lv_demo_widgets();
-    //::lv_demo_keypad_encoder();
-    //::lv_demo_benchmark();
-
-    std::thread(::LvglTaskSchedulerLoop).detach();
-
+    while(1)
+    {
+        lv_init();
+        {
+            lvgl_handle_t lv_handle{};
+            lvgl_initialize( lv_handle );
+            lvgl_set_current_handle( &lv_handle );
+            //lv_demo_widgets();
+            //lv_demo_keypad_encoder();
+            //lv_demo_benchmark();
+            auto thrd = std::thread( LvglTaskSchedulerLoop );
+            Sleep( 10000 );
+            g_WindowQuitSignal = true;
+            thrd.join();
+            lvgl_set_current_handle( nullptr );
+        } // Destroys the handle & frees buffer memory
+        lv_deinit();
+    }
     return ::LvglWindowsLoop();
 }
